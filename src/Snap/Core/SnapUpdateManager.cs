@@ -283,49 +283,62 @@ namespace Snap.Core
 
             progressSource?.RaiseTotalProgress(0);
 
-            // Todo: Refactor - Delete all nupkgs that are no longer required
-            // https://github.com/youpark/snapx/issues/9
+            var nupkgsDeleted = 0;
+            var storageBytesSaved = 0L;
 
-            SnapRelease snapGenisisRelease;
-            if (snapAppChannelReleases.Count() == 1)
+            _logger.Debug($"Deleting nupkgs that are no longer required in packages directory: {_packagesDirectory}.");
+
+            try
             {
-                snapGenisisRelease = snapReleases.Single();
-                if (snapGenisisRelease.IsGenesis && snapGenisisRelease.Gc)
+                var snapReleaseFileNames = snapAppChannelReleases.Select(x => x.BuildNugetFilename()).ToList();
+                
+                var nupkgs = _snapOs.Filesystem
+                    .DirectoryGetAllFiles(_packagesDirectory)
+                    .Where(x => _snapOs.Filesystem.PathGetExtension(x).EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                _logger.Debug($"Found {nupkgs.Count} nupkgs.");
+
+                foreach (var nupkgFilenameAbsolute in nupkgs)
                 {
+                    var nupkgFilename = _snapOs.Filesystem.PathGetFileName(nupkgFilenameAbsolute);
+                    if (snapReleaseFileNames.Contains(nupkgFilename, StringComparer.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
                     try
                     {
-                        var nugetPackages = _snapOs.Filesystem
-                            .DirectoryGetAllFiles(_packagesDirectory)
-                            .Where(x => 
-                                !string.Equals(snapGenisisRelease.Filename, x, StringComparison.OrdinalIgnoreCase) 
-                                && x.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase))
-                            .ToList();
-
-                        if (nugetPackages.Count > 0)
+                        var fileSizeRead = false;
+                        SnapUtility.Retry(() =>
                         {
-                            _logger.Debug($"Garbage collecting (removing) previous nuget packages. Packages that will be removed: {nugetPackages.Count}.");
-
-                            foreach (var nugetPackageAbsolutePath in nugetPackages)
+                            if (!fileSizeRead)
                             {
-                                try
-                                {
-                                    SnapUtility.Retry(() => _snapOs.Filesystem.FileDelete(nugetPackageAbsolutePath), 3);
-                                }
-                                catch (Exception e)
-                                {
-                                    _logger.ErrorException($"Failed to delete: {nugetPackageAbsolutePath}", e);
-                                    continue;
-                                }
-                                
-                                _logger.Debug($"Deleted nuget package: {nugetPackageAbsolutePath}.");
-                            }                            
-                        }
+                                storageBytesSaved += _snapOs.Filesystem.FileStat(nupkgFilenameAbsolute).Length;
+                                fileSizeRead = true;
+                            }
+                            _snapOs.Filesystem.FileDelete(nupkgFilenameAbsolute);
+                        }, 3);
                     }
                     catch (Exception e)
                     {
-                        _logger.ErrorException($"Unknown error listing files in packages directory: {_packagesDirectory}.", e);                        
+                        _logger.ErrorException($"Failed to delete: {nupkgFilenameAbsolute}.", e);
+                        continue;
                     }
-                }
+                                
+                    _logger.Debug($"Deleted nuget package: {nupkgFilenameAbsolute}.");
+
+                    nupkgsDeleted++;
+                }   
+            }
+            catch (Exception e)
+            {
+                _logger.ErrorException($"Unknown error listing files in packages directory: {_packagesDirectory}.", e);                        
+            }
+
+            if (nupkgsDeleted > 0)
+            {
+                _logger.Debug($"Deleted {nupkgsDeleted} nupkgs that are no longer required. Total space reclaimed: {storageBytesSaved.BytesAsHumanReadable()}.");
             }
 
             var snapPackageManagerProgressSource = new SnapPackageManagerProgressSource
